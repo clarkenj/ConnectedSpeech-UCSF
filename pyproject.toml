@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "csucsf"
+description = "Data processing and analysis of connected speech features in PPA"
+readme = "README.md"
+license = { file ="LICENSE" }
+authors = [
+    {name = "Natasha Clarke", email = "natashajayne@gmail.com"},
+    {name = "Christophe Bedetti", email = "christophe.bedetti@umontreal.ca"},
+]
+keywords = ["science", "research", "data-analysis", "reproducibility"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+]
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = [
+  "Jinja2",
+  "jiwer",
+  "matplotlib",
+  "openpyxl",
+  "pandas",
+  "pingouin",
+  "scikit-learn",
+  "seaborn<0.14.0",
+  "statannotations",
+]
+
+[project.scripts]
+csucsf_process_merge = "csucsf.process_merge_features:main"
+csucsf_describe_participants = "csucsf.describe_participants:main"
+csucsf_analysis_wer = "csucsf.analysis_wer:main"
+csucsf_analysis_icc = "csucsf.analysis_icc:main"
+csucsf_classification = "csucsf.classification:main"
+csucsf_classification_stats = "csucsf.analyse_classification:main"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/csucsf/_version.py"
