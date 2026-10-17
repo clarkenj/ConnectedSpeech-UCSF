@@ -4,6 +4,7 @@ import jiwer
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+import pingouin as pg
 
 from scipy import stats
 from statannotations.Annotator import Annotator
@@ -239,17 +240,31 @@ def main():
         plt.close()
 
         # diagnosis
-        md = ols("value ~ diagnosis + variable + diagnosis:variable", data=df_manual_whisper).fit()
-        table = sm.stats.anova_lm(md, typ=2)
-        table.to_csv(results_dir / f'{METRIC_NAME}_{tag}_diagnosis_anova.tsv', sep="\t")
+        aov = pg.mixed_anova(
+            data=df_manual_whisper,
+            dv="value",
+            within="variable",
+            between="diagnosis",
+            subject="participant_id",
+        )
+        aov.to_csv(results_dir / f'{METRIC_NAME}_{tag}_diagnosis_mixed_anova.tsv', sep="\t")
 
-        tukey_oneway = pairwise_tukeyhsd(endog=df_manual_whisper["value"], groups=df_manual_whisper["variable"])
-        with (results_dir / f'{METRIC_NAME}_{tag}_diagnosis_transcript.csv').open("w") as summary_file:
-            summary_file.write(tukey_oneway.summary().as_csv())
+        posthoc_method = pg.pairwise_tests(
+            data=df_manual_whisper,
+            dv="value",
+            within="variable",
+            subject="participant_id",
+            padjust="fdr_bh",
+        )
+        posthoc_method.to_csv(results_dir / f'{METRIC_NAME}_{tag}_diagnosis_transcript.csv')
 
-        tukey_oneway = pairwise_tukeyhsd(endog=df_manual_whisper["value"], groups=df_manual_whisper["diagnosis"])
-        with (results_dir / f'{METRIC_NAME}_{tag}_diagnosis_diagnosis.csv').open("w") as summary_file:
-            summary_file.write(tukey_oneway.summary().as_csv())
+        posthoc_diag = pg.pairwise_tests(
+            data=df_manual_whisper,
+            dv="value",
+            between="diagnosis",
+            padjust="fdr_bh",
+        )
+        posthoc_diag.to_csv(results_dir / f'{METRIC_NAME}_{tag}_diagnosis_diagnosis.csv')
         
         ax = sns.boxplot(
             data=df_manual_whisper,
@@ -267,7 +282,7 @@ def main():
             # title="Manual vs. Whisper",
         )
         ax.get_legend().set_title("")
-
+        print ("Done")
         # pairs=[
         #     (("svPPA", "manual vs. whisper"), ("HC", "manual vs. whisper")),
         #     (("lvPPA", "manual vs. whisper"), ("HC", "manual vs. whisper")),
