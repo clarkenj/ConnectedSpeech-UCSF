@@ -4,6 +4,7 @@ import seaborn as sns
 import numpy as np
 import pandas as pd
 import math
+from scipy import stats
 
 from pathlib import Path
 
@@ -165,6 +166,59 @@ def main():
     # Save
     summary_table.to_csv(results_dir / "participants_summary.tsv", sep="\t")
 
+    ####################
+    # Compute Group Comparison Statistics (ANOVA / Chi-Square)
+    ####################
+    stat_results = []
+
+    # 1. Categorical: Sex (Chi-Square)
+    contingency_sex = pd.crosstab(df["Diagnosis"], df["Sex"])
+    chi2_sex, p_sex, _, _ = stats.chi2_contingency(contingency_sex)
+    stat_results.append({
+      "Variable": "Sex (Female proportion)",
+      "Test": "Chi-Square (Chi2)",
+      "Statistic": chi2_sex,
+      "p_value": p_sex,
+    })
+
+    # 2. Continuous variables: One-Way ANOVA & Kruskal-Wallis
+    test_vars = {
+      "Age": "Age",
+      "Education": "Education",
+      "MMSE": "MMSE",
+      "CDR Sum of Boxes": "CDR Sum of Boxes",
+    }
+
+    for label, col in test_vars.items():
+        sub_df = df[["Diagnosis", col]].dropna()
+        groups = [group[col].values for _, group in sub_df.groupby("Diagnosis")]
+
+        # One-Way ANOVA
+        f_val, p_anova = stats.f_oneway(*groups)
+        # Non-parametric alternative (Kruskal-Wallis)
+        h_val, p_kw = stats.kruskal(*groups)
+
+        stat_results.append({
+            "Variable": label,
+            "Test": "One-Way ANOVA (F)",
+            "Statistic": f_val,
+            "p_value": p_anova,
+        })
+        stat_results.append({
+            "Variable": label,
+            "Test": "Kruskal-Wallis (H)",
+            "Statistic": h_val,
+            "p_value": p_kw,
+        })
+
+    df_stats = pd.DataFrame(stat_results)
+    df_stats.to_csv(
+        results_dir / "group_comparison_stats.tsv", sep="\t", index=False
+    )
+    print(
+        f"Group comparison statistics saved to {results_dir / 'group_comparison_stats.tsv'}"
+    )
+
     # Generate distribution plots
     plt.style.use('default')
     sns.set_palette("colorblind")
@@ -175,3 +229,5 @@ def main():
     for col in ["Sex", "Handedness"]:
         print(df[col].unique())
         plot_categorical_dist(df, col, results_dir)
+
+
