@@ -173,25 +173,29 @@ def main():
 
     # 1. Categorical: Sex (Chi-Square)
     contingency_sex = pd.crosstab(df["Diagnosis"], df["Sex"])
-    chi2_sex, p_sex, _, _ = stats.chi2_contingency(contingency_sex)
+    chi2_sex, p_sex, dof_sex, _ = stats.chi2_contingency(contingency_sex)
     stat_results.append({
-      "Variable": "Sex (Female proportion)",
-      "Test": "Chi-Square (Chi2)",
-      "Statistic": chi2_sex,
-      "p_value": p_sex,
+        "Variable": "Sex (Female proportion)",
+        "Test": "Chi-Square (Chi2)",
+        "Statistic": chi2_sex,
+        "df": dof_sex,
+        "N": int(contingency_sex.values.sum()),
+        "p_value": p_sex,
     })
 
     # 2. Continuous variables: One-Way ANOVA & Kruskal-Wallis
     test_vars = {
-      "Age": "Age",
-      "Education": "Education",
-      "MMSE": "MMSE",
-      "CDR Sum of Boxes": "CDR Sum of Boxes",
+        "Age": "Age",
+        "Education": "Education",
+        "MMSE": "MMSE",
+        "CDR Sum of Boxes": "CDR Sum of Boxes",
     }
 
     for label, col in test_vars.items():
         sub_df = df[["Diagnosis", col]].dropna()
         groups = [group[col].values for _, group in sub_df.groupby("Diagnosis")]
+        n = len(sub_df)
+        k = len(groups)
 
         # One-Way ANOVA
         f_val, p_anova = stats.f_oneway(*groups)
@@ -202,12 +206,16 @@ def main():
             "Variable": label,
             "Test": "One-Way ANOVA (F)",
             "Statistic": f_val,
+            "df": f"{k - 1}, {n - k}",
+            "N": n,
             "p_value": p_anova,
         })
         stat_results.append({
             "Variable": label,
             "Test": "Kruskal-Wallis (H)",
             "Statistic": h_val,
+            "df": k - 1,
+            "N": n,
             "p_value": p_kw,
         })
 
@@ -215,9 +223,8 @@ def main():
     df_stats.to_csv(
         results_dir / "group_comparison_stats.tsv", sep="\t", index=False
     )
-    print(
-        f"Group comparison statistics saved to {results_dir / 'group_comparison_stats.tsv'}"
-    )
+
+    print(df[["Age", "Education", "MMSE", "CDR Sum of Boxes"]].isna().groupby(df["Diagnosis"]).sum())
 
     # Generate distribution plots
     plt.style.use('default')
