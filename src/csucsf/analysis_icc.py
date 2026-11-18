@@ -103,7 +103,7 @@ def plot_icc_feature(data, feature, iccs, output_dir):
     
     fig_joint.ax_joint.set_title(feature, pad=70)
     
-    icc3 = iccs[iccs["Type"] == "ICC3"].drop(columns=["Type", "Description", "df1", "df2"]).set_index("group")
+    icc3 = iccs[iccs["Type"].isin(["ICC3", "ICC(C,1)"])].drop(columns=["Type", "Description", "df1", "df2"], errors="ignore").set_index("group")
     for col in ["ICC", "F", "pval"]:
         icc3[col] = icc3[col].apply("{:.4g}".format)
     
@@ -174,7 +174,7 @@ def main_analysis(data, results_dir, tag):
             all_stats.append(stats)
         
         df_stats = pd.concat(all_stats)
-        df_stats = df_stats[df_stats["Type"] == "ICC3"]
+        df_stats = df_stats[df_stats["Type"].isin(["ICC3", "ICC(C,1)"])]
         agreements = df_stats.pivot(index="feature", columns="group", values=["koo_li"])
         agreements.columns = agreements.columns.get_level_values(1)
 
@@ -197,7 +197,7 @@ def main_analysis(data, results_dir, tag):
     # 
     ####################
     df_iccs = pd.concat(ICCs.values())
-    df_iccs = df_iccs[df_iccs["Type"] == "ICC3"]
+    df_iccs = df_iccs[df_iccs["Type"].isin(["ICC3", "ICC(C,1)"])]
 
     koo_li_count = df_iccs.groupby(["group", "koo_li", "domain"])["Type"].count().unstack("domain").fillna(0).astype(int)
     koo_li_count.to_excel(results_dir / f"koo_li_categories_all_participant_{tag}.xlsx")
