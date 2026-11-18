@@ -5,11 +5,22 @@ import itertools
 import matplotlib.pyplot as plt
 from pathlib import Path
 from itertools import combinations
-from scipy.stats import ttest_rel
-from scipy.stats import wilcoxon
 from statsmodels.stats.multitest import multipletests
 
 from csucsf.config import DEFAULT_DERIVATIVES_DIR
+
+def add_feature_set(df):
+    """
+    Label each row with its feature set: 'all', 'icc' (ICC filtered) or the feature
+    selection label (e.g. 'kbest20').
+    """
+    df = df.copy()
+    df["feature_set"] = np.where(
+        df["icc_filtered"],
+        "icc",
+        np.where(df["feature_selection"] == "none", "all", df["feature_selection"])
+    )
+    return df
 
 def create_summary_df(cv_df, boot_df, metrics):
     """
@@ -38,66 +49,96 @@ def create_summary_df(cv_df, boot_df, metrics):
             rows.append(row)
     return pd.DataFrame(rows)
 
-def pairwise_stats(cv_df, metrics, alpha=0.05):
-    """
-    Perform Wilcoxon signed-rank tests between methods for each task and ICC condition.
-    Applies FDR correction across all tests.
-    """
-    results = []    
-    methods_to_compare = cv_df["method"].unique()
+def bootstrap_difference(diff):
+    """Mean difference, percentile CI and two-sided bootstrap p-value for paired bootstrap differences."""
+    p = 2 * min((diff <= 0).sum() + 1, (diff >= 0).sum() + 1) / (len(diff) + 1)
+    return {
+        "Mean_diff": diff.mean(),
+        "CI_lower": np.percentile(diff, 2.5),
+        "CI_upper": np.percentile(diff, 97.5),
+        "p_value": min(p, 1.0),
+        "n_bootstrap": len(diff)
+    }
 
-    for task in cv_df["task"].unique():
-        for icc_status in cv_df["icc_filtered"].unique():
-            task_df = cv_df[(cv_df["task"] == task) & (cv_df["icc_filtered"] == icc_status)]
-
-            for m1, m2 in itertools.combinations(methods_to_compare, 2):
-                for metric in metrics:
-                    s1 = task_df[task_df["method"] == m1][metric].dropna()
-                    s2 = task_df[task_df["method"] == m2][metric].dropna()
-
-                    # Ensure paired samples
-                    n = min(len(s1), len(s2))
-                    if n < 2:  # too few folds to compare
-                        continue
-
-                    s1, s2 = s1.iloc[:n], s2.iloc[:n]
-
-                    try:
-                        stat, p = wilcoxon(s1, s2, alternative="two-sided")
-                    except ValueError:
-                        continue
-
-                    diff = s1.mean() - s2.mean()
-                    results.append({
-                        "Task": task,
-                        "ICC_filtered": icc_status,
-                        "Metric": metric,
-                        "Method1": m1,
-                        "Method2": m2,
-                        "Mean_diff": diff,
-                        "p_value": p,
-                        "n_folds": n
-                    })
-
-    df = pd.DataFrame(results)
-
-    # FDR correction
+def fdr_correct(df, alpha=0.05):
+    """Apply FDR correction across all tests."""
     reject, p_corrected, _, _ = multipletests(df["p_value"], alpha=alpha, method="fdr_bh")
     df["p_value_corrected"] = p_corrected
     df["sig_uncorrected"] = df["p_value"] < alpha
     df["sig_corrected"] = reject
-
     return df
 
-def plot_cv_summary(cv_df, figure_p, method_order, metrics=["auc"], icc=False):
+def pairwise_stats(boot_df, metrics, alpha=0.05):
+    """
+    Paired bootstrap comparisons between methods for each task and feature set.
+    Applies FDR correction across all tests.
+    """
+    results = []
+    methods_to_compare = boot_df["method"].unique()
+
+    for task in boot_df["task"].unique():
+        for feature_set in boot_df["feature_set"].unique():
+            fs_df = boot_df[(boot_df["task"] == task) & (boot_df["feature_set"] == feature_set)]
+
+            for m1, m2 in itertools.combinations(methods_to_compare, 2):
+                for metric in metrics:
+                    s1 = fs_df[fs_df["method"] == m1].set_index("bootstrap")[metric]
+                    s2 = fs_df[fs_df["method"] == m2].set_index("bootstrap")[metric]
+                    if s1.empty or s2.empty:
+                        continue
+
+                    # Same bootstrap resample for both methods, so differences are paired
+                    diff = (s1 - s2).dropna()
+
+                    results.append({
+                        "Task": task,
+                        "Feature_set": feature_set,
+                        "Metric": metric,
+                        "Method1": m1,
+                        "Method2": m2,
+                        **bootstrap_difference(diff)
+                    })
+
+    return fdr_correct(pd.DataFrame(results), alpha)
+
+def feature_set_stats(boot_df, metrics, alpha=0.05):
+    """
+    Paired bootstrap comparisons between each reduced feature set and the full feature set,
+    for each task and method. Applies FDR correction across all tests.
+    """
+    results = []
+    reduced_sets = [fs for fs in boot_df["feature_set"].unique() if fs != "all"]
+
+    for task in boot_df["task"].unique():
+        for method in boot_df["method"].unique():
+            base = boot_df[(boot_df["task"] == task) & (boot_df["method"] == method)
+                           & (boot_df["feature_set"] == "all")]
+
+            for feature_set in reduced_sets:
+                other = boot_df[(boot_df["task"] == task) & (boot_df["method"] == method)
+                                & (boot_df["feature_set"] == feature_set)]
+                if base.empty or other.empty:
+                    continue
+
+                for metric in metrics:
+                    diff = (other.set_index("bootstrap")[metric] - base.set_index("bootstrap")[metric]).dropna()
+
+                    results.append({
+                        "Task": task,
+                        "Method": method,
+                        "Metric": metric,
+                        "Feature_set": feature_set,
+                        "Compared_with": "all",
+                        **bootstrap_difference(diff)
+                    })
+
+    return fdr_correct(pd.DataFrame(results), alpha)
+
+def plot_cv_summary(cv_df, figure_p, method_order, metrics=["auc"], feature_set="all"):
     """
     Plot CV results as bars with mean ± SD per task and transcript method.
     """
-    df_plot = cv_df.copy()
-    if icc:
-        df_plot = df_plot[df_plot["icc_filtered"] == True]
-    else:
-        df_plot = df_plot[df_plot["icc_filtered"] == False]
+    df_plot = cv_df[cv_df["feature_set"] == feature_set].copy()
 
     for metric in metrics:
         # Compute mean and SD per task and method
@@ -149,14 +190,14 @@ def plot_cv_summary(cv_df, figure_p, method_order, metrics=["auc"], icc=False):
 
         plt.ylabel(f"{metric.upper()} (mean ± SD)")
         plt.xlabel("Classification task")
-        title_suffix = "ICC filtered" if icc else "No ICC filtering"
+        title_suffix = {"all": "No ICC filtering", "icc": "ICC filtered"}.get(feature_set, feature_set)
         plt.title(f"{title_suffix} {metric.upper()} by transcript method")
         plt.ylim(0.4, 1)
         plt.legend(title="Transcript method")
         plt.tight_layout()
 
-        icc_flag = "_icc" if icc else ""
-        plt.savefig(figure_p / f"cv_{metric}{icc_flag}.png", dpi=300)
+        flag = "" if feature_set == "all" else f"_{feature_set}"
+        plt.savefig(figure_p / f"cv_{metric}{flag}.png", dpi=300)
         plt.close()
             
     print(f"Plots saved to {figure_p}")
@@ -283,31 +324,33 @@ def main():
     #classifier = "SVC"
     metrics = ["auc", "balanced_accuracy", "f1", "sensitivity", "specificity"]
     method_order = ["salt-edit", "whisper-raw", "whisper-edit"]
+    feature_sets = {"all": "no_icc", "icc": "icc", "kbest20": "kbest20"}
 
     # Load results
-    boot_df = pd.read_csv(input_p / "bootstrap_results.csv")
-    cv_df = pd.read_csv(input_p / "cv_results.csv")
+    boot_df = add_feature_set(pd.read_csv(input_p / "bootstrap_results.csv"))
+    cv_df = add_feature_set(pd.read_csv(input_p / "cv_results.csv"))
 
     # Compare iccc filtered and unfileterd results
-    box_swarm_icc(boot_df, figure_p)
+    box_swarm_icc(boot_df[boot_df["feature_set"].isin(["all", "icc"])], figure_p)
 
     # generate AUC plot with no ICC filtering
-    box_swarm(boot_df[boot_df['icc_filtered'] == False], method_order, figure_p)
+    box_swarm(boot_df[boot_df["feature_set"] == "all"], method_order, figure_p)
 
-    # bar plot of CV results
-    plot_cv_summary(cv_df, figure_p, method_order, metrics,  icc=False)
-    plot_cv_summary(cv_df, figure_p, method_order, metrics, icc=True)
+    for feature_set, name in feature_sets.items():
+        # bar plot of CV results
+        plot_cv_summary(cv_df, figure_p, method_order, metrics, feature_set=feature_set)
 
-    # generate summarys in a nice looking table
-    no_icc_summary_df = create_summary_df(cv_df[cv_df['icc_filtered'] == False], boot_df[boot_df['icc_filtered'] == False], metrics)
-    icc_summary_df = create_summary_df(cv_df[cv_df['icc_filtered'] == True], boot_df[boot_df['icc_filtered'] == True], metrics)
+        # generate summarys in a nice looking table
+        summary_df = create_summary_df(cv_df[cv_df["feature_set"] == feature_set],
+                                       boot_df[boot_df["feature_set"] == feature_set], metrics)
 
-    # output
-    no_icc_summary_df.to_excel(input_p / "no_icc_summary.xlsx", index=False)
-    icc_summary_df.to_excel(input_p / "icc_summary.xlsx", index=False)
+        # output
+        summary_df.to_excel(input_p / f"{name}_summary.xlsx", index=False)
 
-    # generate Wilcoxon pairwise comparisons
-    stats_df = pairwise_stats(cv_df, metrics)
-    stats_df.to_excel(input_p / "pairwise_wilcoxon.xlsx", index=False)
-    
+    # generate paired bootstrap comparisons between transcript types
+    stats_df = pairwise_stats(boot_df, metrics)
+    stats_df.to_excel(input_p / "pairwise_bootstrap.xlsx", index=False)
 
+    # generate paired bootstrap comparisons between feature sets
+    feature_stats_df = feature_set_stats(boot_df, metrics)
+    feature_stats_df.to_excel(input_p / "feature_set_bootstrap.xlsx", index=False)

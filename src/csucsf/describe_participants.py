@@ -4,6 +4,9 @@ import seaborn as sns
 import numpy as np
 import pandas as pd
 import math
+from itertools import combinations
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+from statsmodels.stats.multitest import multipletests
 from scipy import stats
 
 from pathlib import Path
@@ -225,6 +228,55 @@ def main():
     )
 
     print(df[["Age", "Education", "MMSE", "CDR Sum of Boxes"]].isna().groupby(df["Diagnosis"]).sum())
+    
+    ####################
+    # Post hoc pairwise comparisons
+    ####################
+    posthoc_results = []
+
+    # Age: Tukey HSD (parametric; group SDs are similar)
+    sub = df[["Diagnosis", "Age"]].dropna()
+    tukey = pairwise_tukeyhsd(endog=sub["Age"], groups=sub["Diagnosis"], alpha=0.05)
+    tukey_df = pd.DataFrame(tukey._results_table.data[1:], columns=tukey._results_table.data[0])
+    for _, row in tukey_df.iterrows():
+        posthoc_results.append({
+            "Variable": "Age",
+            "Test": "Tukey HSD",
+            "Group 1": row["group1"],
+            "Group 2": row["group2"],
+            "Mean diff (Group 2 - Group 1)": row["meandiff"],
+            "p_adj": row["p-adj"],
+            "N": len(sub),
+        })
+
+    # MMSE and CDR Sum of Boxes: pairwise Mann-Whitney U, Benjamini-Hochberg corrected
+    # (non-parametric, because HC have no variance in CDR and Kruskal-Wallis was used)
+    for col in ["MMSE", "CDR Sum of Boxes"]:
+        sub = df[["Diagnosis", col]].dropna()
+        pairs = list(combinations(sorted(sub["Diagnosis"].unique()), 2))
+        raw_p, rows = [], []
+        for g1, g2 in pairs:
+            a = sub.loc[sub["Diagnosis"] == g1, col]
+            b = sub.loc[sub["Diagnosis"] == g2, col]
+            u_val, p_val = stats.mannwhitneyu(a, b, alternative="two-sided")
+            raw_p.append(p_val)
+            rows.append((g1, g2, len(a), len(b), u_val))
+        p_adj = multipletests(raw_p, method="fdr_bh")[1]
+        for (g1, g2, n1, n2, u_val), p_raw, p_corr in zip(rows, raw_p, p_adj):
+            posthoc_results.append({
+                "Variable": col,
+                "Test": "Mann-Whitney U (BH-corrected)",
+                "Group 1": g1,
+                "Group 2": g2,
+                "U": u_val,
+                "p_raw": p_raw,
+                "p_adj": p_corr,
+                "N": f"{n1} vs {n2}",
+            })
+
+    df_posthoc = pd.DataFrame(posthoc_results)
+    df_posthoc.to_csv(results_dir / "group_comparison_posthoc.tsv", sep="\t", index=False)
+    print(df_posthoc.to_string())
 
     # Generate distribution plots
     plt.style.use('default')

@@ -2,10 +2,11 @@ import datetime
 import numpy as np
 import pandas as pd
 from statsmodels.stats.multitest import multipletests
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import StratifiedKFold
 from sklearn.base import clone
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.svm import SVC
 from sklearn.metrics import (
     roc_auc_score,
@@ -50,15 +51,20 @@ def classification_metrics(y_true, y_pred, y_proba):
 
 def cv_classifier(df_task, features, methods, diag_map, cv_splitter, model):
     """
-    Run CV classification for multiple methods and return metrics per fold.
+    Run CV classification for multiple methods and return metrics per fold,
+    plus the out-of-fold predictions for each method.
     """
     all_results = []
+    oof_predictions = {}
 
     for method in methods:
         df_method = df_task[df_task["transcript_type"] == method]
         X = df_method[features]
         y = df_method["diagnosis"].map(diag_map)
-            
+
+        oof_pred = np.zeros(len(y), dtype=int)
+        oof_proba = np.zeros(len(y))
+
         method_results = []
         for train_idx, test_idx in cv_splitter.split(X, y):
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
@@ -71,62 +77,57 @@ def cv_classifier(df_task, features, methods, diag_map, cv_splitter, model):
             y_pred = model.predict(X_test)
             y_proba = model.predict_proba(X_test)[:, 1]
 
+            oof_pred[test_idx] = y_pred
+            oof_proba[test_idx] = y_proba
+
             # Collect metrics for this fold
             fold_metrics = classification_metrics(y_test, y_pred, y_proba)
             fold_metrics['method'] = method
             method_results.append(fold_metrics)
 
+        oof_predictions[method] = pd.DataFrame(
+            {"y_true": y.to_numpy(), "y_pred": oof_pred, "y_proba": oof_proba},
+            index=df_method.index
+        )
         all_results.extend(method_results)
 
-    return pd.DataFrame(all_results)
+    return pd.DataFrame(all_results), oof_predictions
 
-def bootstrap_classifier(clf, df_task, features, methods, diag_map,
-                                 test_size=0.5, n_bootstrap=1000, random_state=None):
-
+def bootstrap_classifier(oof_predictions, methods, n_bootstrap=1000, random_state=None):
+    """
+    Bootstrap participants (stratified by class) and recompute the metrics from the
+    out-of-fold predictions. The same resamples are used for all methods.
+    """
     rng = np.random.default_rng(random_state)
-    all_indices = df_task.index.unique().to_numpy()
+    for m in methods:
+        assert oof_predictions[m].index.is_unique
+
+    ids = oof_predictions[methods[0]].index
+    oof = {m: oof_predictions[m].loc[ids] for m in methods}
+    y = oof[methods[0]]["y_true"].to_numpy()
+    for m in methods:
+        assert np.array_equal(oof[m]["y_true"].to_numpy(), y)
+
+    pos = np.where(y == 1)[0]
+    neg = np.where(y == 0)[0]
     all_results = {m: [] for m in methods}
 
-    # get one diagnosis per unique participant for straification
-    diag_unique = df_task.loc[~df_task.index.duplicated(keep='first'), "diagnosis"]
-    # ensure order matches all_indices
-    stratify_series = diag_unique.loc[all_indices]
-
-    # Single stratified split, uses same test set for all bootstraps and methods
-    train_all_idx, test_idx = train_test_split(
-        all_indices,
-        test_size=test_size,
-        stratify=stratify_series,
-        random_state=random_state
-    ) 
-
     for b in range(n_bootstrap):
-        # Bootstrap training set
-        train_idx = rng.choice(train_all_idx, size=len(train_all_idx), replace=True)
+        idx = np.concatenate([
+            rng.choice(pos, size=len(pos), replace=True),
+            rng.choice(neg, size=len(neg), replace=True)
+        ])
 
-        # Loop over methods using same train/test participants
         for method in methods:
-            df_method = df_task[df_task["transcript_type"] == method]
-
-            X_train = df_method.loc[train_idx, features]
-            y_train = df_method.loc[train_idx, "diagnosis"].map(diag_map)
-            X_test = df_method.loc[test_idx, features]  
-            y_test = df_method.loc[test_idx, "diagnosis"].map(diag_map)
-
-            model_clone = clone(clf)
-            model_clone.fit(X_train, y_train)
-            y_pred = model_clone.predict(X_test)
-            y_proba = model_clone.predict_proba(X_test)[:, 1]
-
-            all_results[method].append({
-                'y_test': y_test,
-                'metrics': classification_metrics(y_test, y_pred, y_proba)
-            }) #'y_pred': y_pred,'y_proba': y_proba, don't need these
+            o = oof[method].iloc[idx]
+            metrics = classification_metrics(o["y_true"], o["y_pred"], o["y_proba"])
+            metrics["bootstrap"] = b
+            all_results[method].append(metrics)
 
     return all_results
 
 def run_transcription_ml(df, features, diag_pairs, methods, clf, cv_splitter, filter_by_icc, icc_results=None,
-                         test_size=0.2, n_bootstrap=10, random_state=None):
+                         n_bootstrap=10, random_state=None, feature_selection="none"):
     """
     Run both CV and bootstrap analysis for all tasks and methods.
     """
@@ -155,26 +156,29 @@ def run_transcription_ml(df, features, diag_pairs, methods, clf, cv_splitter, fi
         else:
             print(f"Using all {len(filtered_features)} features")
 
+        n_features = len(filtered_features)
+        if "selectkbest" in clf.named_steps:
+            n_features = min(clf.named_steps["selectkbest"].k, n_features)
+
         print("Running CV for all methods...")
-        cv_results = cv_classifier(df_task, filtered_features, methods, diag_map, cv_splitter, clf)
+        cv_results, oof_predictions = cv_classifier(df_task, filtered_features, methods, diag_map, cv_splitter, clf)
         cv_results["task"] = task
         cv_results["icc_filtered"] = filter_by_icc
-        cv_results["n_features"] = len(filtered_features)
+        cv_results["feature_selection"] = feature_selection
+        cv_results["n_features"] = n_features
         all_cv_results.append(cv_results)
 
         print("Bootstrapping all methods...")
-        boot_results = bootstrap_classifier(clf, df_task, filtered_features, methods, 
-                                           diag_map, test_size, n_bootstrap, random_state)
+        boot_results = bootstrap_classifier(oof_predictions, methods, n_bootstrap, random_state)
 
         # Convert to DataFrame
         for method_name, boot_list in boot_results.items():
             df_boot = pd.DataFrame(boot_list)
-            metrics_df = pd.json_normalize(df_boot['metrics'])
-            df_boot = pd.concat([df_boot.drop(columns=['metrics']), metrics_df], axis=1)
             df_boot["task"] = task
             df_boot["method"] = method_name
             df_boot["icc_filtered"] = filter_by_icc
-            df_boot["n_features"] = len(filtered_features)
+            df_boot["feature_selection"] = feature_selection
+            df_boot["n_features"] = n_features
             all_bootstrap_results.append(df_boot)
 
     # Combine all results
@@ -200,9 +204,11 @@ def main():
     # Define ML setup
     # -----------------------------
     SEED = 42
+    K = 20
     cv_splitter = StratifiedKFold(n_splits=10, shuffle=True, random_state=SEED)
     clf = SVC(probability=True, kernel="linear", random_state=SEED, class_weight='balanced')
     model = make_pipeline(StandardScaler(), clf)
+    model_k = make_pipeline(StandardScaler(), SelectKBest(f_classif, k=K), clone(clf))
 
     features = DOMAIN_FEATURES + PSYCHOLINGUISTIC_FEATURES
     metrics = ["auc", "balanced_accuracy", "f1", "sensitivity", "specificity"]
@@ -215,25 +221,32 @@ def main():
     ]
 
     # -----------------------------
-    # Run ML with and without ICC filtering
+    # Run ML with and without ICC filtering, and with feature selection
     # -----------------------------
     print("Running without ICC filtering...")
     cv_no_icc, boot_no_icc = run_transcription_ml(
         df=df, features=features, diag_pairs=diag_pairs, methods=methods,
         clf=model, cv_splitter=cv_splitter, filter_by_icc=False,
-        test_size=0.2, n_bootstrap=100, random_state=SEED
+        n_bootstrap=1000, random_state=SEED
     )
-    
+
     print("Running with ICC filtering...")
     cv_icc, boot_icc = run_transcription_ml(
         df=df, features=features, diag_pairs=diag_pairs, methods=methods,
         clf=model, cv_splitter=cv_splitter, filter_by_icc=True,
-        icc_results=icc_results, test_size=0.2, n_bootstrap=100, random_state=SEED
+        icc_results=icc_results, n_bootstrap=1000, random_state=SEED
+    )
+
+    print(f"Running with feature selection (k={K})...")
+    cv_k, boot_k = run_transcription_ml(
+        df=df, features=features, diag_pairs=diag_pairs, methods=methods,
+        clf=model_k, cv_splitter=cv_splitter, filter_by_icc=False,
+        n_bootstrap=1000, random_state=SEED, feature_selection=f"kbest{K}"
     )
 
     # Combine results
-    cv_df = pd.concat([cv_no_icc, cv_icc], ignore_index=True)
-    boot_df = pd.concat([boot_no_icc, boot_icc], ignore_index=True)
+    cv_df = pd.concat([cv_no_icc, cv_icc, cv_k], ignore_index=True)
+    boot_df = pd.concat([boot_no_icc, boot_icc, boot_k], ignore_index=True)
 
     # Output results
     cv_df.to_csv(results_dir / "cv_results.csv", index=False)
