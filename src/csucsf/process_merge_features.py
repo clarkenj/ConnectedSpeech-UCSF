@@ -84,6 +84,7 @@ def process_features(df):
 def main():
     # Load data
     pheno_df = pd.read_csv(DEFAULT_DATASET_DIR / "participants.tsv",sep="\t", index_col="participant_id")
+    pheno_df = pheno_df.drop(index="sub-24651", errors="ignore")
     text_df = pd.read_csv(DEFAULT_SPEECHMETRYFLOW_DIR / "Statistics/LINGUALAB_TEXT/population_lingualab_text.csv", index_col="participant_id")
 
     # Extract transcript type

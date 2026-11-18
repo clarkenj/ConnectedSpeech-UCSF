@@ -87,7 +87,7 @@ def main():
 
     # Load UCSF data
     df_ucsf = pd.read_excel(
-        DEFAULT_TRANSCRIPTS_DIR / "LAVA-Merged_simona_natasha_cases_re-run_06-19-2025.xlsx",
+        DEFAULT_TRANSCRIPTS_DIR / "LAVA-Merged_simona_natasha_cases_re-run_06-19-2025_backup.xlsx",
         index_col=0
     )
 
